@@ -49,6 +49,9 @@ public class RemoteService extends IRemoteService.Stub {
     private int TYPE_SECURE_SYSTEM_OVERLAY;
     private final Handler mHandler = new Handler(Looper.getMainLooper());
     private WindowManager mWindowManager;
+    private IBinder activeClientBinder;
+    private DeathRecipient activeClientDeathRecipient;
+    private long serverGeneration = 0;
     protected Context context;
     public static final String TAG = "xtmapper-server";
     boolean startedFromShell = false;
@@ -60,15 +63,22 @@ public class RemoteService extends IRemoteService.Stub {
     }
 
     private WindowManager getWindowManager(int displayId) {
-        WindowManager windowManager;
         try {
-            windowManager = prepareCursorOverlayWindow(displayId);
+            return prepareCursorOverlayWindow(displayId);
         } catch (Exception e) {
-            Log.e(TAG, e.getMessage(), e);
-            windowManager = context.getSystemService(WindowManager.class);
-        }
+            cursorView = null;
+            Log.e(TAG, "Unable to create cursor window on display " + displayId, e);
 
-        return windowManager;
+            Display display = context.getSystemService(DisplayManager.class).getDisplay(displayId);
+            if (display != null) {
+                try {
+                    return context.createDisplayContext(display).getSystemService(WindowManager.class);
+                } catch (Exception fallbackError) {
+                    Log.e(TAG, "Unable to obtain display WindowManager " + displayId, fallbackError);
+                }
+            }
+            return context.getSystemService(WindowManager.class);
+        }
     }
 
 
@@ -125,25 +135,39 @@ public class RemoteService extends IRemoteService.Stub {
 
 
     public WindowManager prepareCursorOverlayWindow(int displayId) throws NoSuchMethodException, NoSuchFieldException, IllegalAccessException, InvocationTargetException {
-        final WindowManager windowManager;
         TYPE_SECURE_SYSTEM_OVERLAY = WindowManager.LayoutParams.class.getField("TYPE_SECURE_SYSTEM_OVERLAY").getInt(null);
 
         Display display = context.getSystemService(DisplayManager.class).getDisplay(displayId);
-        this.context = this.context.createDisplayContext(display);
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            this.context = this.context.createWindowContext(display, TYPE_SECURE_SYSTEM_OVERLAY, null);
+        if (display == null) {
+            throw new IllegalArgumentException("Display " + displayId + " is not available");
         }
-        /*
-        * We obtained an instance of WindowManager configured to show windows on the given display.
-        * Now call getSystemService(Class) on the returned window context.
-        */
-        windowManager = this.context.getSystemService(WindowManager.class);
 
-        LayoutInflater layoutInflater = this.context.getSystemService(LayoutInflater.class);
-        this.context.setTheme(R.style.Theme_XtMapper);
+        // Never mutate the base package Context. Samsung DeX may reconnect or resize
+        // display 2 repeatedly; retaining a display/window context here makes later
+        // package/resource operations use stale display state.
+        Context displayContext = context.createDisplayContext(display);
+        Context windowContext = displayContext;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            windowContext = displayContext.createWindowContext(display, TYPE_SECURE_SYSTEM_OVERLAY, null);
+        }
+
+        final WindowManager windowManager = windowContext.getSystemService(WindowManager.class);
+        cursorView = null;
+
+        // Shizuku/ADB servers run as shell (uid 2000) while the package resources
+        // belong to the app uid. Inflating an app view from that process can throw
+        // "calling package ... does not match caller uid". In that case use the
+        // app-process callback in TouchPointer, which is also display-aware.
+        if (android.os.Process.myUid() != context.getApplicationInfo().uid) {
+            Log.i(TAG, "Using client-side cursor overlay for display " + displayId
+                    + " because remote uid=" + android.os.Process.myUid()
+                    + " app uid=" + context.getApplicationInfo().uid);
+            return windowManager;
+        }
+
+        windowContext.setTheme(R.style.Theme_XtMapper);
+        LayoutInflater layoutInflater = windowContext.getSystemService(LayoutInflater.class);
         cursorView = CursorBinding.inflate(layoutInflater).getRoot();
-
 
         Binder sWindowToken = new Binder();
         Method setDefaultTokenMethod = windowManager.getClass().getMethod("setDefaultToken", IBinder.class);
@@ -216,9 +240,6 @@ public class RemoteService extends IRemoteService.Stub {
         return true;
     }
 
-    private final DeathRecipient mStartServerDeathRecipient =
-            () -> mHandler.post(() -> stopServer(true));
-
     /**
      * Called by client to start the remote server.
      *
@@ -230,15 +251,31 @@ public class RemoteService extends IRemoteService.Stub {
      */
     @Override
     public void startServer(KeymapProfile profile, KeymapConfig keymapConfig, IRemoteServiceCallback cb, int screenWidth, int screenHeight, int displayId) throws RemoteException {
-        if (cb != null) cb.asBinder().linkToDeath(mStartServerDeathRecipient, 0);
         mHandler.post(() -> {
-            if (inputService != null) {
-                if (isWaylandClient) {
-                    inputService.hideCursor();
-                    inputService.stop();
+            // Serialize every restart on the main looper. This is important on DeX,
+            // where display/configuration callbacks can arrive in quick succession.
+            stopServer(false);
+
+            final long generation = ++serverGeneration;
+            final IBinder clientBinder = cb != null ? cb.asBinder() : null;
+            final DeathRecipient deathRecipient = () -> mHandler.post(() -> {
+                if (generation == serverGeneration && activeClientBinder == clientBinder) {
+                    Log.i(TAG, "Client binder died; stopping generation " + generation);
+                    stopServer(false);
                 }
-                stopServer(false);
+            });
+
+            if (clientBinder != null) {
+                try {
+                    clientBinder.linkToDeath(deathRecipient, 0);
+                } catch (RemoteException e) {
+                    Log.w(TAG, "Client died before startServer completed", e);
+                    return;
+                }
             }
+            activeClientBinder = clientBinder;
+            activeClientDeathRecipient = deathRecipient;
+
             mWindowManager = getWindowManager(displayId);
 
             if (keymapConfig.pointerMode != KeymapConfig.POINTER_SYSTEM) {
@@ -246,6 +283,7 @@ public class RemoteService extends IRemoteService.Stub {
             } else {
                 cursorView = null;
             }
+
             try {
                 inputService = new InputService(profile, keymapConfig, cb, screenWidth, screenHeight, cursorView, isWaylandClient, displayId);
                 if (!isWaylandClient) {
@@ -253,13 +291,20 @@ public class RemoteService extends IRemoteService.Stub {
                     inputService.openDevice(currentDevice);
                 }
             } catch (RemoteException e) {
+                stopServer(false);
                 throw new RuntimeException(e);
             }
-            // Launch app/game
+
+            Log.i(TAG, "Server active on display " + displayId + " at " + screenWidth + "x" + screenHeight);
+
+            // Launch the mapped app on the same selected display. Samsung DeX uses
+            // display 2, and relying on the current focus can otherwise open the game
+            // back on the phone (display 0).
             if (!profile.packageName.equals(BuildConfig.APPLICATION_ID) && keymapConfig.disableAutoProfiling) {
                 Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(profile.packageName);
                 if (launchIntent != null && launchIntent.getComponent() != null) try {
-                    new ProcessBuilder("am", "start", "-a", "android.intent.action.MAIN", "-n",
+                    new ProcessBuilder("am", "start", "--display", String.valueOf(displayId),
+                            "-a", "android.intent.action.MAIN", "-n",
                             launchIntent.getComponent().flattenToString()).start();
                 } catch (IOException e) {
                     throw new RuntimeException(e);
@@ -270,56 +315,75 @@ public class RemoteService extends IRemoteService.Stub {
 
     @Override
     public void destroy() {
-        stopServer(true);
+        mHandler.post(() -> stopServer(true));
     }
 
     @Override
     public void stopServer() {
-        mHandler.post(() -> stopServer(true));
+        // Stopping a mapping must not kill the Shizuku/root user-service process.
+        // Keeping the Binder alive lets EditorActivity reconnect without showing
+        // a false "Not Activated" warning.
+        mHandler.post(() -> stopServer(false));
     }
 
     private void stopServer(boolean exitProcess) {
-        // Samsung DeX can trigger rapid display/configuration changes which cause
-        // startServer() and Binder death callbacks to overlap. Never repeatedly
-        // dereference the shared field while tearing the service down: another
-        // callback may otherwise make it null between two cleanup calls.
         final InputService service = inputService;
+        ++serverGeneration;
 
-        if (service != null && service.getCallback() != null) {
+        IBinder oldClientBinder = activeClientBinder;
+        DeathRecipient oldDeathRecipient = activeClientDeathRecipient;
+        activeClientBinder = null;
+        activeClientDeathRecipient = null;
+
+        if (oldClientBinder != null && oldDeathRecipient != null) {
             try {
-                service.getCallback().disablePointer();
-            } catch (RemoteException e) {
-                // The client may already be dead; cleanup must still continue.
-                Log.w(TAG, "Client disconnected while disabling pointer", e);
+                oldClientBinder.unlinkToDeath(oldDeathRecipient, 0);
+            } catch (Exception ignored) {
             }
         }
 
-        if (!startedFromShell && exitProcess) {
-            System.exit(0);
-            return;
-        }
-
-        if (service != null && !isWaylandClient) {
+        if (service != null) {
             service.stopEvents = true;
             try {
                 service.hideCursor();
             } catch (RuntimeException e) {
-                // hideCursor() may call a Binder callback that has already died.
                 Log.w(TAG, "Client disconnected while hiding cursor", e);
             }
-            service.stop();
-            service.stopMouse();
-            service.stopTouchpad();
-            service.destroyUinputDev();
 
-            if (service.getCallback() != null) {
-                service.getCallback().asBinder().unlinkToDeath(mStartServerDeathRecipient, 0);
+            try {
+                service.stop();
+            } catch (RuntimeException e) {
+                Log.w(TAG, "Failed to stop event handlers", e);
             }
 
-            // Do not clear a newer InputService created by a subsequent start.
+            if (!isWaylandClient) {
+                try {
+                    service.stopMouse();
+                } catch (RuntimeException e) {
+                    Log.w(TAG, "Failed to stop mouse reader", e);
+                }
+                try {
+                    service.stopTouchpad();
+                } catch (RuntimeException e) {
+                    Log.w(TAG, "Failed to stop touchpad", e);
+                }
+                try {
+                    service.destroyUinputDev();
+                } catch (RuntimeException e) {
+                    Log.w(TAG, "Failed to destroy uinput cursor", e);
+                }
+            }
+
             if (inputService == service) {
                 inputService = null;
             }
+        }
+
+        cursorView = null;
+        mWindowManager = null;
+
+        if (!startedFromShell && exitProcess) {
+            System.exit(0);
         }
     }
     private final DeathRecipient mKeyEventListenerDeathRecipient = () -> mOnKeyEventListener = null;
