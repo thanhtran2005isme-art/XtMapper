@@ -17,6 +17,7 @@ import com.topjohnwu.superuser.ipc.RootService;
 import rikka.shizuku.Shizuku;
 import xtr.keymapper.BuildConfig;
 import xtr.keymapper.IRemoteService;
+import xtr.keymapper.keymap.KeymapConfig;
 
 public class RemoteServiceHelper {
 
@@ -162,23 +163,45 @@ public class RemoteServiceHelper {
     public static void getInstance(Context context, RootRemoteServiceCallback callback) {
         if (isSystemApp(context)) {
             getInstanceAsSystemApp(context, callback);
-        } else {
-            getInstance();
-            if (service != null) {
-                callback.onConnection(service);
+            return;
+        }
+
+        // Do not rely on MainActivity having initialized this static flag. On Samsung
+        // DeX the editor can be launched directly from a notification on display 2
+        // after Android recreated the app process. In that case useShizuku would be
+        // false even though the saved setting and Shizuku permission are valid.
+        boolean savedUseShizuku = new KeymapConfig(context).useShizuku;
+        boolean shizukuReady = Shizuku.pingBinder()
+                && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
+
+        if (savedUseShizuku || shizukuReady) {
+            useShizuku = true;
+        }
+
+        getInstance();
+        if (service != null) {
+            if (callback != null) callback.onConnection(service);
+            return;
+        }
+
+        RemoteServiceConnection connection = new RemoteServiceConnection(callback);
+        if (useShizuku) {
+            if (shizukuReady) {
+                Log.i(RemoteService.TAG, "Binding Shizuku user service for " + context.getPackageName());
+                bindShizukuService(context, connection);
             } else {
-                RemoteServiceConnection connection = new RemoteServiceConnection(callback);
-                if (useShizuku) {
-                    if (Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED)
-                        bindShizukuService(context, connection);
-                    else callback.onConnection(null);
-                } else {
-                    if (Boolean.TRUE.equals(Shell.isAppGrantedRoot())) {
-                        Intent intent = new Intent(context, RootRemoteService.class);
-                        RootService.bind(intent, connection);
-                    } else callback.onConnection(null);
-                }
+                Log.w(RemoteService.TAG, "Shizuku selected but not running/authorized for " + context.getPackageName());
+                if (callback != null) callback.onConnection(null);
             }
+            return;
+        }
+
+        if (Boolean.TRUE.equals(Shell.isAppGrantedRoot())) {
+            Intent intent = new Intent(context, RootRemoteService.class);
+            RootService.bind(intent, connection);
+        } else {
+            Log.w(RemoteService.TAG, "No activation backend available");
+            if (callback != null) callback.onConnection(null);
         }
     }
 }
