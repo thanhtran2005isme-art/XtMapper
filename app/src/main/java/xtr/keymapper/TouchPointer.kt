@@ -1,5 +1,6 @@
 package xtr.keymapper
 
+import android.app.ActivityOptions
 import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -84,7 +85,9 @@ class TouchPointer : Service() {
             this.selectedProfile = "Default"
         }
 
-
+        // Resolve the target display before constructing notification/editor intents.
+        // On Samsung DeX the selected desktop is typically display 2.
+        this.displayId = i.getIntExtra(DISPLAY_ID, Display.DEFAULT_DISPLAY)
 
         val name = "Overlay"
         val channel =
@@ -108,7 +111,21 @@ class TouchPointer : Service() {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 .addFlags(Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
                 .putExtra(EditorActivity.PROFILE_NAME, selectedProfile)
-            pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+                .putExtra(DISPLAY_ID, displayId)
+
+            val options = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ActivityOptions.makeBasic().apply {
+                    setLaunchDisplayId(displayId)
+                }.toBundle()
+            } else null
+
+            pendingIntent = PendingIntent.getActivity(
+                this,
+                0,
+                intent,
+                PendingIntent.FLAG_IMMUTABLE,
+                options
+            )
         }
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -124,8 +141,6 @@ class TouchPointer : Service() {
         } else {
             startForeground(2, notification)
         }
-
-        this.displayId = i.getIntExtra(DISPLAY_ID, Display.DEFAULT_DISPLAY)
 
         val displayManager = getSystemService(DisplayManager::class.java)
         val selectedDisplay = displayManager.getDisplay(displayId)
