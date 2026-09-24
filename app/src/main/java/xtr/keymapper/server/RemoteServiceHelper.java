@@ -20,11 +20,12 @@ import xtr.keymapper.IRemoteService;
 
 public class RemoteServiceHelper {
 
-    private static IRemoteService service = null;
+    private static volatile IRemoteService service = null;
     public static boolean useShizuku = false;
 
     public static void pauseKeymap(Context context){
         getInstance(context, service -> {
+            if (service == null) return;
             try {
                 service.pauseMouse();
             } catch (RemoteException e) {
@@ -35,6 +36,7 @@ public class RemoteServiceHelper {
 
     public static void resumeKeymap(Context context){
         RemoteServiceHelper.getInstance(context, service -> {
+            if (service == null) return;
             try {
                 service.resumeMouse();
             } catch (RemoteException e) {
@@ -71,23 +73,48 @@ public class RemoteServiceHelper {
             this.cb = cb;
         }
         @Override
-        public void onServiceConnected(ComponentName name, IBinder service) {
-            cb.onConnection(IRemoteService.Stub.asInterface(service));
+        public void onServiceConnected(ComponentName name, IBinder binder) {
+            IRemoteService connectedService = IRemoteService.Stub.asInterface(binder);
+            RemoteServiceHelper.service = connectedService;
+            try {
+                binder.linkToDeath(() -> {
+                    if (RemoteServiceHelper.service != null
+                            && RemoteServiceHelper.service.asBinder() == binder) {
+                        RemoteServiceHelper.service = null;
+                    }
+                }, 0);
+            } catch (RemoteException e) {
+                RemoteServiceHelper.service = null;
+                connectedService = null;
+            }
+            if (cb != null) cb.onConnection(connectedService);
         }
 
         @Override
         public void onServiceDisconnected(ComponentName name) {
-
+            RemoteServiceHelper.service = null;
+            if (cb != null) cb.onConnection(null);
         }
     }
 
     private static void getInstance(){
-        if (service == null) {
-                service = IRemoteService.Stub.asInterface(ServiceManager.getService("xtmapper"));
-                if (service != null) try {
-                    service.asBinder().linkToDeath(() -> service = null, 0);
-                } catch (RemoteException ignored) {
-                }
+        IRemoteService cached = service;
+        if (cached != null && cached.asBinder().isBinderAlive()) return;
+
+        service = null;
+        IBinder binder = ServiceManager.getService("xtmapper");
+        if (binder != null) {
+            IRemoteService connectedService = IRemoteService.Stub.asInterface(binder);
+            try {
+                binder.linkToDeath(() -> {
+                    if (service != null && service.asBinder() == binder) {
+                        service = null;
+                    }
+                }, 0);
+                service = connectedService;
+            } catch (RemoteException ignored) {
+                service = null;
+            }
         }
     }
 
