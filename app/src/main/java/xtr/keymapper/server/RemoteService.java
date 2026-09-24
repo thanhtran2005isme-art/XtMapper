@@ -185,23 +185,30 @@ public class RemoteService extends IRemoteService.Stub {
     /**
      * Executes getevent command and processes the output or reads from stdin if wayland client
      */
-    private void start_getevent() { try {
-        final BufferedReader getevent;
-        if (isWaylandClient) {
-            getevent = new BufferedReader(new InputStreamReader(System.in));
-        } else {
-            getevent = Utils.geteventStream(nativeLibraryDir);
-        }
-        String line;
-        while ((line = getevent.readLine()) != null) {
-            String[] data = line.split(":"); // split a string like "/dev/input/event2: EV_REL REL_X ffffffff"
-            if (addNewDevices(data)) {
-                // Input events are read on a background thread while start/stop operations
-                // run on the main handler. Keep a stable reference for the whole event.
-                InputService service = inputService;
-                if (service != null) try {
-                    if (isWaylandClient && data[0].contains("wl_pointer"))
+    private void start_getevent() {
+        try {
+            final BufferedReader getevent;
+            if (isWaylandClient) {
+                getevent = new BufferedReader(new InputStreamReader(System.in));
+            } else {
+                getevent = Utils.geteventStream(nativeLibraryDir);
+            }
+
+            String line;
+            while ((line = getevent.readLine()) != null) {
+                try {
+                    String[] data = line.split(":", 2); // /dev/input/event2: EV_REL REL_X ffffffff
+                    if (!addNewDevices(data)) continue;
+
+                    // Input events are read on a background thread while start/stop
+                    // operations run on the main handler. Keep a stable reference for
+                    // the whole event so a concurrent restart cannot null it midway.
+                    InputService service = inputService;
+                    if (service == null) continue;
+
+                    if (isWaylandClient && data[0].contains("wl_pointer")) {
                         service.onWaylandMouseEvent(data[1]);
+                    }
 
                     KeyEventHandler k = service.getKeyEventHandler();
                     if (!service.stopEvents) {
@@ -209,15 +216,26 @@ public class RemoteService extends IRemoteService.Stub {
                     } else {
                         k.handleKeyboardShortcutEvent(data[1]);
                     }
-                    if (mOnKeyEventListener != null) mOnKeyEventListener.onKeyEvent(line);
-                } catch (RemoteException e) {
-                    throw new RuntimeException(e);
+
+                    OnKeyEventListener listener = mOnKeyEventListener;
+                    if (listener != null) {
+                        try {
+                            listener.onKeyEvent(line);
+                        } catch (RemoteException e) {
+                            mOnKeyEventListener = null;
+                            Log.w(TAG, "Editor key listener disconnected", e);
+                        }
+                    }
+                } catch (Exception eventError) {
+                    // A malformed or transient getevent line must not permanently kill
+                    // input capture. Samsung/DeX hotplug can emit unusual device lines.
+                    Log.w(TAG, "Ignoring malformed input event: " + line, eventError);
                 }
             }
+        } catch (Exception e) {
+            Log.e(TAG, "getevent reader stopped", e);
         }
-    } catch (Exception e){
-        Log.e(TAG, e.getMessage(), e);
-    }}
+    }
 
     /**
      * @param data split output of getevent command
@@ -228,7 +246,8 @@ public class RemoteService extends IRemoteService.Stub {
         if (data.length != 2) return false;
         String evdev = data[0];
 
-        input_event = data[1].split("\\s+");
+        input_event = data[1].trim().split("\\s+");
+        if (input_event.length < 2) return false;
         if (isWaylandClient) return true;
         if( !currentDevice.equals(evdev) )
             if (input_event[1].equals("EV_REL")) {
