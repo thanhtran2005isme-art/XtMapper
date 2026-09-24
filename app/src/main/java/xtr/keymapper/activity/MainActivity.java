@@ -75,6 +75,16 @@ public class MainActivity extends AppCompatActivity {
          * ServiceManager Binder first, so disabling Shizuku here is unnecessary and
          * on Samsung DeX it made activation unexpectedly disappear after reconnects.
          */
+        if (!startedFromShell
+                && !keymapConfig.useShizuku
+                && Shizuku.pingBinder()
+                && Shizuku.checkSelfPermission() == PERMISSION_GRANTED) {
+            // If this package has already been authorized in Shizuku, prefer it
+            // automatically. This avoids falling back to the root/ADB path after a
+            // DeX process restart and showing a misleading "Not Activated" state.
+            keymapConfig.useShizuku = true;
+            keymapConfig.applySharedPrefs();
+        }
         RemoteServiceHelper.useShizuku = keymapConfig.useShizuku;
         Server.setupServer(this, mCallback);
 
