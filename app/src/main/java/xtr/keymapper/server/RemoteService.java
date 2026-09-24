@@ -40,7 +40,7 @@ import xtr.keymapper.server.event.KeyEventHandler;
 
 public class RemoteService extends IRemoteService.Stub {
     private String currentDevice = "";
-    InputService inputService;
+    volatile InputService inputService;
     private OnKeyEventListener mOnKeyEventListener;
     boolean isWaylandClient = false;
     private ActivityObserverService activityObserverService;
@@ -172,12 +172,15 @@ public class RemoteService extends IRemoteService.Stub {
         while ((line = getevent.readLine()) != null) {
             String[] data = line.split(":"); // split a string like "/dev/input/event2: EV_REL REL_X ffffffff"
             if (addNewDevices(data)) {
-                if (inputService != null) try {
+                // Input events are read on a background thread while start/stop operations
+                // run on the main handler. Keep a stable reference for the whole event.
+                InputService service = inputService;
+                if (service != null) try {
                     if (isWaylandClient && data[0].contains("wl_pointer"))
-                        inputService.onWaylandMouseEvent(data[1]);
+                        service.onWaylandMouseEvent(data[1]);
 
-                    KeyEventHandler k = inputService.getKeyEventHandler();
-                    if (!inputService.stopEvents) {
+                    KeyEventHandler k = service.getKeyEventHandler();
+                    if (!service.stopEvents) {
                         k.handleEvent(data[1]);
                     } else {
                         k.handleKeyboardShortcutEvent(data[1]);
@@ -206,16 +209,15 @@ public class RemoteService extends IRemoteService.Stub {
         if( !currentDevice.equals(evdev) )
             if (input_event[1].equals("EV_REL")) {
                 System.out.println("add mouse device: " + evdev);
-                if (inputService != null) inputService.openDevice(evdev);
+                InputService service = inputService;
+                if (service != null) service.openDevice(evdev);
                 currentDevice = evdev;
             }
         return true;
     }
 
-    private final DeathRecipient mStartServerDeathRecipient = () -> {
-        inputService = null;
-        stopServer();
-    };
+    private final DeathRecipient mStartServerDeathRecipient =
+            () -> mHandler.post(() -> stopServer(true));
 
     /**
      * Called by client to start the remote server.
@@ -277,23 +279,47 @@ public class RemoteService extends IRemoteService.Stub {
     }
 
     private void stopServer(boolean exitProcess) {
-        if (inputService != null) try {
-            inputService.getCallback().disablePointer();
-        } catch (RemoteException e) {
-            throw new RuntimeException(e);
+        // Samsung DeX can trigger rapid display/configuration changes which cause
+        // startServer() and Binder death callbacks to overlap. Never repeatedly
+        // dereference the shared field while tearing the service down: another
+        // callback may otherwise make it null between two cleanup calls.
+        final InputService service = inputService;
+
+        if (service != null && service.getCallback() != null) {
+            try {
+                service.getCallback().disablePointer();
+            } catch (RemoteException e) {
+                // The client may already be dead; cleanup must still continue.
+                Log.w(TAG, "Client disconnected while disabling pointer", e);
+            }
         }
 
         if (!startedFromShell && exitProcess) {
             System.exit(0);
-        } else if (inputService != null && !isWaylandClient) {
-            inputService.stopEvents = true;
-            inputService.hideCursor();
-            inputService.stop();
-            inputService.stopMouse();
-            inputService.stopTouchpad();
-            inputService.destroyUinputDev();
-            if (inputService.getCallback() != null) inputService.getCallback().asBinder().unlinkToDeath(mStartServerDeathRecipient, 0);
-            inputService = null;
+            return;
+        }
+
+        if (service != null && !isWaylandClient) {
+            service.stopEvents = true;
+            try {
+                service.hideCursor();
+            } catch (RuntimeException e) {
+                // hideCursor() may call a Binder callback that has already died.
+                Log.w(TAG, "Client disconnected while hiding cursor", e);
+            }
+            service.stop();
+            service.stopMouse();
+            service.stopTouchpad();
+            service.destroyUinputDev();
+
+            if (service.getCallback() != null) {
+                service.getCallback().asBinder().unlinkToDeath(mStartServerDeathRecipient, 0);
+            }
+
+            // Do not clear a newer InputService created by a subsequent start.
+            if (inputService == service) {
+                inputService = null;
+            }
         }
     }
     private final DeathRecipient mKeyEventListenerDeathRecipient = () -> mOnKeyEventListener = null;
