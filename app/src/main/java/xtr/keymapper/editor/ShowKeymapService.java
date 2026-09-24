@@ -76,7 +76,7 @@ public class ShowKeymapService extends Service {
         editorUi = new EditorUI(context, editorCallback, selectedProfile, EditorUI.SHOW_KEYMAP_ONLY);
         editorUi.loadKeymapAfterView();
         editorUi.showControls(keymapConfig.showControlsOpacity);
-        return START_STICKY;
+        return START_NOT_STICKY;
     }
 
     private final EditorCallback editorCallback = () -> {
