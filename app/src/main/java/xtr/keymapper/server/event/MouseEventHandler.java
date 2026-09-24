@@ -215,10 +215,13 @@ public class MouseEventHandler {
             case BTN_MIDDLE:
                 if (value == 1 && Objects.equals(mInput.getKeymapConfig().mouseAimShortcutKey, "KEY_MMB"))
                     triggerMouseAim();
-                else if (value == 1 && Objects.equals(mInput.getKeymapProfile().camera.triggerKeyCode, "KEY_MMB"))
+                else if (value == 1
+                        && mInput.getKeymapProfile().camera != null
+                        && Objects.equals(mInput.getKeymapProfile().camera.triggerKeyCode, "KEY_MMB"))
                     triggerCamera();
                 else
                     mInput.injectMiddleClickEvent(x1, y1, pointerId, value == 1);
+                break;
 
             case REL_WHEEL:
                 if (mInput.getKeyEventHandler().ctrlKeyPressed && keymapConfig.ctrlMouseWheelZoom)
