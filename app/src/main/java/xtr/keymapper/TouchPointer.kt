@@ -402,8 +402,8 @@ class TouchPointer : Service() {
         get() {
             val displayManager =
                 getSystemService(DisplayManager::class.java)
-            val display = displayManager.getDisplay(displayId)
-            val context: Context? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val display = displayManager.getDisplay(displayId) ?: return null
+            val context: Context = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 createDisplayContext(display).createWindowContext(
                     display,
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
