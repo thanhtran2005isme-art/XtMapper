@@ -100,6 +100,8 @@ class TouchPointer : Service() {
 
         if (keymapConfig.editorOverlay) {
             val intent = Intent(this, EditorService::class.java)
+                .putExtra(DISPLAY_ID, displayId)
+                .putExtra(EditorActivity.PROFILE_NAME, selectedProfile)
             pendingIntent = PendingIntent.getService(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
         } else {
             val intent = Intent(this, EditorActivity::class.java)
@@ -239,7 +241,7 @@ class TouchPointer : Service() {
                     }
                 }
                 if (keymapConfig.showControls) {
-                    ShowKeymapService.start(this, selectedProfile)
+                    ShowKeymapService.start(this, selectedProfile, displayId)
                 }
             } catch (e: Exception) {
                 if (activityCallback != null) {
@@ -290,6 +292,7 @@ class TouchPointer : Service() {
         override fun launchEditor() {
             val intent = Intent(this@TouchPointer, EditorService::class.java)
             intent.putExtra(EditorActivity.PROFILE_NAME, selectedProfile)
+            intent.putExtra(DISPLAY_ID, displayId)
             startService(intent)
         }
 
