@@ -70,14 +70,11 @@ public class MainActivity extends AppCompatActivity {
         KeymapConfig keymapConfig = new KeymapConfig(this);
 
         /*
-         * If user has enabled "Use Shizuku" but this activity was started from shell (waydroid or adb)
-         * Then reset "Use Shizuku" setting to false since it crashes the app
+         * Keep the user's Shizuku preference even when MainActivity was opened by
+         * the shell helper. RemoteServiceHelper always reuses an already published
+         * ServiceManager Binder first, so disabling Shizuku here is unnecessary and
+         * on Samsung DeX it made activation unexpectedly disappear after reconnects.
          */
-        if (startedFromShell && keymapConfig.useShizuku) {
-            keymapConfig.useShizuku = false;
-            keymapConfig.applySharedPrefs();
-        }
-
         RemoteServiceHelper.useShizuku = keymapConfig.useShizuku;
         Server.setupServer(this, mCallback);
 
